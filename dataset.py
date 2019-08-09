@@ -20,34 +20,45 @@ class Dataset:
     def split_data(self, conf):
         """conf: C1.1 C1.2"""
         self.config = (int(conf[1]), int(conf[3]))
-        # np.random.seed(0)
-        test_proj_id = set(np.random.choice(range(self.nb_proj), int(self.nb_proj*0.1), replace=False))
+        np.random.seed(0)
+        test_proj_id = set(np.random.choice(range(self.nb_proj), int(self.nb_proj*0.2), replace=False))
         total_users = sum([len(val) for val in self.proj_have_users])
         print('total user methods:{}, test_proj:{}'.format(total_users, test_proj_id))
 
+        def get_test_user(user_id, k):
+            gt_users = []
+            for uid in user_id:
+                if len(set(self.invocation_mx[uid])) <= k:
+                    self.train_dict[uid] = self.invocation_mx[uid]
+                else:
+                    gt_users.append(uid)
+            return gt_users
+
+        def add_to_test(gt_users, test_cnt, k):
+            for uid in gt_users[-test_cnt:]:
+                # add first k invocation for train, and the last for test
+                self.train_dict[uid] = self.invocation_mx[uid][:k]
+                self.test_dict[uid] = self.invocation_mx[uid][k:]
+                self.test_user2proj[uid] = pid
+            for uid in gt_users[:-test_cnt]:
+                self.train_dict[uid] = self.invocation_mx[uid]
+
         for pid in test_proj_id:
             size = len(self.proj_have_users[pid])
-            print('test pid and user size', pid, size)
-            if self.config[0] == 1:  # remove half user methods randomly
-                user_id = np.random.choice(self.proj_have_users[pid], size//2, replace=False)
+            # print('test pid and user size', pid, size)
+            if self.config[0] == 1:  # remove half user methods
+                user_id = self.proj_have_users[pid][: size//2]
             elif self.config[0] == 2:  # keep all user methods
                 user_id = self.proj_have_users[pid]
             if self.config[1] == 2:  # retain 4 invocations
-                gt_users = []
-                for uid in user_id:
-                    if len(self.invocation_mx[uid]) <= 4:
-                        self.train_dict[uid] = self.invocation_mx[uid]
-                    else:
-                        gt_users.append(uid)
                 # use 0.2 percent methods per project as active methods for test
+                gt_users = get_test_user(user_id, 5)  # users having more than 5 invocations
                 test_cnt = len(gt_users) - int(len(gt_users)*0.8)
-                print('user methods have more than 4 invocations and test_cnt:', len(gt_users), test_cnt)
-                for uid in gt_users[-test_cnt:]:
-                    self.train_dict[uid] = self.invocation_mx[uid][:4]
-                    self.test_dict[uid] = self.invocation_mx[uid][4:]
-                    self.test_user2proj[uid] = pid
-                for uid in gt_users[:-test_cnt]:
-                    self.train_dict[uid] = self.invocation_mx[uid]
+                add_to_test(gt_users, test_cnt, 4)
+            if self.config[1] == 1:  # reserve the first invocation
+                gt_users = get_test_user(user_id, 4)
+                test_cnt = len(user_id) - int(len(user_id)*0.8)
+                add_to_test(gt_users, test_cnt, 1)
 
         cnt = sum([len(val) for val in self.test_dict.values()])
         print('test set methods count:{}, invocations:{}'.format(len(self.test_dict), cnt))

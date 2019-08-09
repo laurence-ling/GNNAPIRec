@@ -56,7 +56,7 @@ def filter_line(lines):
     user_cnt = defaultdict(int)
     for line in clean:
         user_cnt[line[0]] += 1
-    rm_entries = set([key for key in user_cnt if user_cnt[key] <= 1])
+    rm_entries = set([key for key in user_cnt if user_cnt[key] <= 2])
     clean = [line for line in clean if line[0] not in rm_entries]
     return clean
 
@@ -97,7 +97,7 @@ def read_file(basedir):
                     class_id[class_name] = len(class_id)
                     proj_have_class[p_id].append(class_id[class_name])  # add a new class to project
                 cid = class_id[class_name]
-                class_have_method[cid].append('u%d' % um_id)  # 区分是user method还是item method
+                class_have_method[cid].append('u%d' % um_id)  # 区分是user method还是item method'''
 
                 # add class node for callee/item methods
                 class_name = '.'.join(suc.split('/')[:-1])
@@ -145,6 +145,10 @@ def build_adj_matrix(nb_proj, nb_class, nb_user, nb_item):
                 mid += base_tid
             A[base_cid + cid, mid] = 1
             A[mid, base_cid + cid] = 1
+    '''for i, val in enumerate(proj_have_users):
+        for uid in val:
+            A[i, base_uid + uid] = 1
+            A[base_uid + uid, i] = 1'''
 
     for uid, val in invocation_matrix.items():
         for tid in val:

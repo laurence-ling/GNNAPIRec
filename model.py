@@ -26,11 +26,16 @@ class GCNRec(nn.Module):
 
     def refine_embedding(self):
         all_emb = torch.cat([self.other_emb.weight, self.user_emb.weight, self.item_emb.weight])
+        h_emb = []
         conv_emb = F.dropout(self.conv1(all_emb, self.adj),
                              p=self.dropout, training=self.training)
+        h_emb.append(conv_emb)
         conv_emb = F.dropout(self.conv2(conv_emb, self.adj),
                              p=self.dropout, training=self.training)
+        h_emb.append(conv_emb)
         out_emb = self.linear(conv_emb)
+        h_emb.append(out_emb)
+        out_emb = torch.cat(h_emb, dim=1)
         return torch.split(out_emb, [self.nb_other, self.nb_user, self.nb_item])
 
     def get_top_items(self, user, k):
@@ -40,7 +45,7 @@ class GCNRec(nn.Module):
         values, indices = ratings.topk(k)
         return indices
 
-    def forward(self, user, pos_item, neg_item):
+    def forward(self, user, pos_item, neg_item, label):
         """
         :param user: (batch_sz,) int
         :param pos_item: (batch_sz,) int
@@ -64,6 +69,15 @@ class GCNRec(nn.Module):
         # expectation of negative samples: mean(0) -> (batch_sz,)
         # total loss: sum() -> (scalar)
         rank_loss = torch.mean(neg_score-pos_score+self.margin, dim=0).clamp(min=1e-6).sum()
-        loss = rank_loss
+        ce_loss = self.cross_entropy_loss(pos_score, neg_score, label)
+        loss = ce_loss
         return loss
 
+    def log_loss(self, pos_score, neg_score):
+        logits = torch.mean(pos_score - neg_score, dim=0)
+        return -torch.sum(torch.log(torch.sigmoid(logits)))
+
+    def cross_entropy_loss(self, pos_score, neg_score, label):
+        logits = torch.cat([pos_score, torch.flatten(neg_score)])
+        loss = F.binary_cross_entropy_with_logits(logits, label.float())
+        return loss
