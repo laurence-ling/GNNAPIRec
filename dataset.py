@@ -1,4 +1,5 @@
 import numpy as np
+from collections import defaultdict
 
 
 class Dataset:
@@ -15,6 +16,12 @@ class Dataset:
         self.train = []
         self.test_user2proj = {}
         self.config = (2, 2)
+        self.user_pre_emb = []
+        self.item_pre_emb = []
+        self.other_pre_emb = []
+        self.lookup_index = []
+        self.word_pre_emb = []
+        self.vocab_sz = 0
         #self.split_data('C2.2')
 
     def split_data(self, conf):
@@ -96,3 +103,17 @@ class Dataset:
                                    for uid in users]).transpose().flatten()
             yield np.asarray(users), np.asarray(pos_items), neg_items
 
+
+def get_calls_ditribution(dataset):
+    nb_calls = defaultdict(int)
+    for pid in range(dataset.nb_proj):
+        item_size = [len(dataset.invocation_mx[uid]) for uid in dataset.proj_have_users[pid]]
+        for s in item_size:
+            nb_calls[s] += 1
+    s = 0
+    for calls, num in nb_calls.items():
+        if calls <= 6:
+            print('user having {} API calls count as: {}'.format(calls, num))
+        else:
+            s += num
+    print('user having more than 6 API calls count as: {}'.format(s))

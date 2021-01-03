@@ -4,20 +4,22 @@ from tqdm import tqdm
 import numpy as np
 import os
 import sys
+import time
 import argparse
 import logging
 from collections import defaultdict
 
-from preprocess import load_data
+from preprocess import load_data, get_calls_distribution
 from model import GCNRec
 
 logging.basicConfig(format='%(asctime)s-%(levelname)s:%(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-best_suc = [0, 0, 0, 0, 0]
-best_recall = [0, 0, 0, 0, 0]
+device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+best_suc = [0]*21
+best_pre = [0]*21
+best_recall = [0]*21
 test_config = 'C2.2'
 
 
@@ -29,24 +31,31 @@ def train(args):
     dataset = load_data(args.dirname)
     dataset.split_data(test_config)
     adj = dataset.adj.to(device)
+    pre_emb = dataset.word_pre_emb.to(device)
+    lookup = dataset.lookup_index.to(device)
+
     logger.info('start training on dataset user:{}, item:{}, other:{}'.format(
                 dataset.nb_user, dataset.nb_item, dataset.nb_proj+dataset.nb_class))
+    get_calls_distribution(dataset)
 
     model = GCNRec(dataset.nb_user, dataset.nb_item, dataset.nb_proj+dataset.nb_class,
-                   adj).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
+                   adj, dataset.vocab_sz, lookup, pre_emb).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.0005, weight_decay=1e-5)
+    num_params = sum([p.numel() for p in model.parameters()])
+    logger.info('total model parameters: {}'.format(num_params))
 
     batch_sz = args.batch_sz
     neg_sz = args.neg_sz
     save_round = args.save_round
-    nb_epoches = 500
+    nb_epoches = args.epoch_num
     for i in range(nb_epoches):
         dataset.shuffle_train()
         model.train()
         epoch_loss = 0
         for user, pos_item, neg_item in tqdm(dataset.gen_batch(batch_sz, neg_sz),
                                              total=len(dataset.train)//batch_sz):
-            loss = model(gvar(user), gvar(pos_item), gvar(neg_item))
+            label = np.concatenate((np.ones(batch_sz), np.zeros(batch_sz*neg_sz)))
+            loss = model(gvar(user), gvar(pos_item), gvar(neg_item), gvar(label))
             epoch_loss += loss.item()
             if np.isnan(epoch_loss):
                 logger.error(epoch_loss)
@@ -55,7 +64,7 @@ def train(args):
             optimizer.step()
         print('epoch: {} loss:{}'.format(i, epoch_loss))
         if (i+1) % save_round == 0:
-            save_model(model, args.dirname.split('/')[1], i+1)
+            save_model(model, args.dirname, i+1)
             print('saved model dict')
             eval2(model, dataset)
 
@@ -63,6 +72,7 @@ def train(args):
 def eval2(model, dataset):
     test_set = dataset.test_dict
     logger.info('test start. test set size: %d' % len(test_set))
+    t1 = time.time()
     model.eval()
     users = np.asarray(list(test_set.keys()))
     top_items = model.get_top_items(gvar(users), k=24).cpu().numpy()
@@ -98,25 +108,30 @@ def eval2(model, dataset):
             proj_pre[pid].append(p)
             proj_recall[pid].append(r)
         suc_rate = len(suc_methods) / len(users)
-        print('----------------------result@%d--------------------------' % k)
-        print('success rate at method level', suc_rate)
-        print('mean precision:{}, mean recall:{}'.format(np.mean(precisions), np.mean(recalls)))
+        #print('----------------------result@%d--------------------------' % k)
+        #print('success rate at method level', suc_rate)
+        #print('mean precision:{}, mean recall:{}'.format(np.mean(precisions), np.mean(recalls)))
     
         suc_project = [np.mean(val) for val in proj_suc.values()]
-        pres = [np.mean(val) for val in proj_pre.values()]
-        recs = [np.mean(val) for val in proj_recall.values()]
-        print('**********************************************************')
-        print('success rate at project level', np.mean(np.mean(suc_project)))
-        print('mean precision:{}, mean recall:{}'.format(np.mean(pres), np.mean(recs)))
-        return suc_rate, np.mean(recalls)
+        #pres = [np.mean(val) for val in proj_pre.values()]
+        #recs = [np.mean(val) for val in proj_recall.values()]
+        #print('**********************************************************')
+        #print('success rate at project level', np.mean(np.mean(suc_project)))
+        #print('mean precision:{}, mean recall:{}'.format(np.mean(pres), np.mean(recs)))
+        return suc_rate, np.mean(precisions), np.mean(recalls)
 
-    for i, k in enumerate([1, 3, 5, 10, 20]):
-        suc, rec = res_at_k(k)
+    t2 = time.time()
+    logger.info('test end time: {}s'.format(t2 - t1))
+    for i in range(1,21):
+        suc, pre, rec = res_at_k(i)
         if suc > best_suc[i]:
             best_suc[i] = suc
+        if pre > best_pre[i]:
+            best_pre[i] = pre
         if rec > best_recall[i]:
             best_recall[i] = rec
-        print('best suc %f, best recall %f' % (best_suc[i], best_recall[i]))
+        print(i, pre, rec, suc)
+        logger.warning('best suc %f, best pre %f,  best recall %f' % (best_suc[i], best_pre[i], best_recall[i]))
 
 
 def eval(args):
@@ -130,14 +145,14 @@ def eval(args):
 
 
 def save_model(model, dir, epoch):
-    model_dir = os.path.join('./', dir+'-weights')
+    model_dir = os.path.join('./weight', dir)
     if not os.path.exists(model_dir):
         os.mkdir(model_dir)
     torch.save(model.state_dict(), os.path.join(model_dir, 'epoch%d.h5' % epoch))
 
 
 def load_model(model, dir, epoch):
-    model_path = os.path.join('./', dir+'-weights/epoch%d.h5' % epoch)
+    model_path = './weight/%s/epoch%d.h5' % (dir, epoch)
     assert os.path.exists(model_path), 'Weights not found.'
     model.load_state_dict(torch.load(model_path))
 
@@ -145,11 +160,11 @@ def load_model(model, dir, epoch):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--eval', action='store_true', default=False, help='eval mode on.')
-    parser.add_argument('--dirname', type=str, default='data/SH_S', help='data set dir.')
+    parser.add_argument('--dirname', type=str, default='SH_S', help='data set dir.')
     parser.add_argument('--batch_sz', type=int, default=64, help='batch size.')
     parser.add_argument('--neg_sz', type=int, default=2, help='negative sample size.')
-    parser.add_argument('--save_round', type=int, default=2, help='save weight per epoch round.')
-    parser.add_argument('--epoch_num', type=int, default=100, help='load model weight at epoch number')
+    parser.add_argument('--save_round', type=int, default=1, help='save weight per epoch round.')
+    parser.add_argument('--epoch_num', type=int, default=30, help='load model weight at epoch number')
     args = parser.parse_args()
     if args.eval:
         eval(args)

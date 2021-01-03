@@ -1,13 +1,16 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from layer import GraphConv
 
 
 class GCNRec(nn.Module):
 
     def __init__(self, nb_user, nb_item, nb_other, adj,
-                 dropout=0.2, margin=1, emb_dim=64):
+                 vocab_sz, lookup_index, pretrain_emb,
+                 dropout=0.2, margin=1, emb_dim=64,
+                 kernel_dim=128):
         super(GCNRec, self).__init__()
         self.nb_user = nb_user
         self.nb_item = nb_item
@@ -15,17 +18,41 @@ class GCNRec(nn.Module):
         self.margin = margin
         self.dropout = dropout
         self.adj = adj
+        self.emb_dim = emb_dim
+        self.lookup_index = lookup_index
 
-        self.other_emb = nn.Embedding(nb_other, emb_dim)
-        self.user_emb = nn.Embedding(nb_user, emb_dim)
-        self.item_emb = nn.Embedding(nb_item, emb_dim)
+        self.word_emb = nn.Embedding(vocab_sz+1, emb_dim, padding_idx=0)
+        self.word_emb.from_pretrained(pretrain_emb)
 
-        self.conv1 = GraphConv(emb_dim, emb_dim)
-        self.conv2 = GraphConv(emb_dim, emb_dim)
-        self.linear = nn.Linear(emb_dim, emb_dim)
+        self.a = nn.Parameter(torch.Tensor(2*emb_dim))
+        self.word_trans = nn.Linear(emb_dim, 2*emb_dim)
+
+        self.other_pos_emb = nn.Embedding(nb_other, emb_dim)
+        self.user_pos_emb = nn.Embedding(nb_user, emb_dim)
+        self.item_pos_emb = nn.Embedding(nb_item, emb_dim)
+        self.conv1 = GraphConv(emb_dim, kernel_dim)
+        self.conv2 = GraphConv(kernel_dim, kernel_dim)
+        self.linear = nn.Linear(2*kernel_dim, 2*emb_dim)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1./math.sqrt(2*self.emb_dim)
+        self.a.data.uniform_(-stdv, stdv)
+
+    def att_pooling(self):
+        emb = self.word_emb(self.lookup_index)
+        e = self.word_trans(emb)
+        # (node_sz, seq_len, 128) -> (node_sz, seq_len, 1)
+        attn = torch.softmax(e.mul(self.a).sum(2), dim=1).unsqueeze(2)
+        # (node_sz, seq_len, 64) -> (node_sz, 64)
+        out = emb.mul(attn).sum(1)
+        return out
 
     def refine_embedding(self):
-        all_emb = torch.cat([self.other_emb.weight, self.user_emb.weight, self.item_emb.weight])
+        # (node_sz, seq_len, emb_dim) -> (node_sz, emb_dim)
+        pos_emb = torch.cat([self.other_pos_emb.weight,
+                             self.user_pos_emb.weight, self.item_pos_emb.weight])
+        all_emb = self.att_pooling() + pos_emb
         h_emb = []
         conv_emb = F.dropout(self.conv1(all_emb, self.adj),
                              p=self.dropout, training=self.training)
@@ -33,9 +60,8 @@ class GCNRec(nn.Module):
         conv_emb = F.dropout(self.conv2(conv_emb, self.adj),
                              p=self.dropout, training=self.training)
         h_emb.append(conv_emb)
-        out_emb = self.linear(conv_emb)
-        h_emb.append(out_emb)
         out_emb = torch.cat(h_emb, dim=1)
+        out_emb = self.linear(out_emb)
         return torch.split(out_emb, [self.nb_other, self.nb_user, self.nb_item])
 
     def get_top_items(self, user, k):
@@ -68,9 +94,10 @@ class GCNRec(nn.Module):
         # (k, batch_sz) - (batch_sz,) -> (k, batch_sz)
         # expectation of negative samples: mean(0) -> (batch_sz,)
         # total loss: sum() -> (scalar)
-        rank_loss = torch.mean(neg_score-pos_score+self.margin, dim=0).clamp(min=1e-6).sum()
-        ce_loss = self.cross_entropy_loss(pos_score, neg_score, label)
-        loss = ce_loss
+        diff = neg_score - pos_score + self.margin
+        rank_loss = torch.mean(diff, dim=0).clamp(min=1e-6, max=1e4).sum()
+        #ce_loss = self.cross_entropy_loss(pos_score, neg_score, label)
+        loss = rank_loss #self.log_loss(pos_score, neg_score)
         return loss
 
     def log_loss(self, pos_score, neg_score):
@@ -81,3 +108,4 @@ class GCNRec(nn.Module):
         logits = torch.cat([pos_score, torch.flatten(neg_score)])
         loss = F.binary_cross_entropy_with_logits(logits, label.float())
         return loss
+

@@ -6,13 +6,18 @@ import scipy.sparse as sp
 import numpy as np
 import torch
 from dataset import Dataset
+from lex import LexParser
+
+MAX_SEQ_LEN = 10
 
 user_method_id = {}
 item_method_id = {}
 class_id = {}
 project_id = {}
-id2user_method = {}
-id2item_method = {}
+user_name = []
+item_name = []
+class_name = []
+project_name = []
 
 invocation_matrix = defaultdict(list)
 proj_have_class = defaultdict(list)
@@ -61,7 +66,8 @@ def filter_line(lines):
     return clean
 
 
-def read_file(basedir):
+def read_file(name):
+    basedir = './data/%s' % name
     file_names = os.listdir(basedir)
     for fname in file_names:
         path = os.path.join(basedir, fname)
@@ -73,42 +79,49 @@ def read_file(basedir):
             pname = fname[:-4]  # remove .txt
             project_id[pname] = len(project_id)
             p_id = project_id[pname]
+            project_pre = 'PROJECT/'
             print(p_id, pname)
 
             lines = [line.strip().split('#') for line in f.readlines()]
             clean_lines = filter_line(lines)
+            if clean_lines:
+                project_pre += clean_lines[0][0].split('/')[0]
+            project_name.append(project_pre)
             users = set()
-            for pre, suc in clean_lines:
-                pre = pname + '/' + pre  # 加上文件名, 区分不同版本的同名API
+            for raw_pre, suc in clean_lines:
+                pre = pname + '/' + raw_pre  # 加上文件名, 区分不同版本的同名API
                 if pre not in user_method_id:
                     user_method_id[pre] = len(user_method_id)
                     users.add(user_method_id[pre])
-                    id2user_method[user_method_id[pre]] = pre
-                if suc not in item_method_id:
+                    user_name.append('UMETHOD/'+raw_pre.split('/')[-1])
+                if suc not in item_method_id:  # callee不存在关心不同版本的问题
                     item_method_id[suc] = len(item_method_id)
-                    id2item_method[item_method_id[suc]] = suc
+                    item_name.append('IMETHOD/'+suc.split('/')[-1])
                 um_id = user_method_id[pre]
                 im_id = item_method_id[suc]
                 invocation_matrix[um_id].append(im_id)
 
                 # add class node for caller/user methods
-                class_name = '.'.join(pre.split('/')[:-1])
-                if class_name not in class_id:
-                    class_id[class_name] = len(class_id)
-                    proj_have_class[p_id].append(class_id[class_name])  # add a new class to project
-                cid = class_id[class_name]
+                c_name = '/'.join(pre.split('/')[:-1])  # remove method name
+                if c_name not in class_id:
+                    class_id[c_name] = len(class_id)
+                    proj_have_class[p_id].append(class_id[c_name])  # add a new class to project
+                    class_name.append('UCLASS/'+c_name.split('/')[-1])  # remove the project name prefix
+                cid = class_id[c_name]
                 class_have_method[cid].append('u%d' % um_id)  # 区分是user method还是item method'''
 
                 # add class node for callee/item methods
-                class_name = '.'.join(suc.split('/')[:-1])
-                if class_name not in class_id:
-                    class_id[class_name] = len(class_id)
-                cid = class_id[class_name]
+                c_name = '/'.join(suc.split('/')[:-1])
+                if c_name not in class_id:
+                    class_id[c_name] = len(class_id)
+                    class_name.append('ICLASS/'+c_name.split('/')[-1])
+                cid = class_id[c_name]
                 class_have_method[cid].append('t%d' % im_id)
             proj_have_users.append(list(users))
             print('project have user methods:', len(users))
 
     print(len(user_method_id), len(item_method_id), len(class_id))
+    assert len(user_name) == len(user_method_id)
     calls = sum([len(val) for val in invocation_matrix.values()])
     print('invocation matrix counts: ', calls)
     rm_entries = set()
@@ -119,9 +132,7 @@ def read_file(basedir):
         invocation_matrix.pop(uid, None)
 
     key = list(invocation_matrix.keys())[0]
-    print(id2user_method[key], invocation_matrix[key])
-    with open(basedir + '-index.pk', 'wb') as f:
-        pk.dump([id2user_method, id2item_method, invocation_matrix], f)
+    print(user_name[key], invocation_matrix[key])
 
 
 def build_adj_matrix(nb_proj, nb_class, nb_user, nb_item):
@@ -130,6 +141,7 @@ def build_adj_matrix(nb_proj, nb_class, nb_user, nb_item):
     base_tid = base_uid + nb_user
     n = base_tid + nb_item
     A = sp.dok_matrix((n, n), dtype=np.float32)
+
 
     for pid, val in proj_have_class.items():
         for cid in val:
@@ -171,6 +183,42 @@ def build_adj_matrix(nb_proj, nb_class, nb_user, nb_item):
     return L
 
 
+def strip_user_prefix(name):
+    return name[name.index('/')+1:]
+
+
+def padding_seq(v):
+    n = len(v)
+    if n >= MAX_SEQ_LEN:
+        return v[-MAX_SEQ_LEN:]
+    else:
+        return v + [0] * (MAX_SEQ_LEN - n)
+
+
+def build_word_embedding(dataset):
+    sents = project_name + class_name + user_name + item_name
+    parser = LexParser(sents)
+    vec = [parser.vectorize(name) for name in sents]
+    max_len = max([len(s) for s in vec])
+    print('max sent len:', max_len)
+    dataset.lookup_index = torch.LongTensor([padding_seq(s) for s in vec])
+
+    dataset.word_pre_emb = torch.stack([torch.from_numpy(
+        emb)for emb in parser.pre_embedding])
+    dataset.vocab_sz = len(parser.vocab)
+
+    dataset.user_pre_emb = torch.stack([torch.from_numpy(
+        parser.get_embedding(name)) for name in user_name])
+    dataset.item_pre_emb = torch.stack([torch.from_numpy(
+        parser.get_embedding(name)) for name in item_name])
+
+    class_pre_emb = torch.stack([torch.from_numpy(
+        parser.get_embedding(name)) for name in class_name])
+    proj_pre_emb = torch.stack([torch.from_numpy(
+        parser.get_embedding(name)) for name in project_name])
+    dataset.other_pre_emb = torch.cat([proj_pre_emb, class_pre_emb])
+
+
 def to_torch_sparse_tensor(sparse_mx):
     """Convert a scipy sparse matrix to a torch sparse tensor."""
     sparse_mx = sparse_mx.tocoo().astype(np.float32)
@@ -180,15 +228,16 @@ def to_torch_sparse_tensor(sparse_mx):
     return torch.sparse.FloatTensor(indices, values, shape)
 
 
-def load_data(basedir):
-    name = basedir+'-data.pk'
+def load_data(dataset_name):
+    name = './tmp/%s-data.pk' % dataset_name
     if not os.path.exists(name):
         print('building dataset from raw file.')
-        read_file(basedir)
+        read_file(dataset_name)
         data = Dataset(len(project_id), len(class_id), len(user_method_id),
                        len(item_method_id), invocation_matrix, proj_have_users)
         data.adj = build_adj_matrix(data.nb_proj, data.nb_class, data.nb_user, data.nb_item)
-        with open(basedir + '-data.pk', 'wb') as f:
+        build_word_embedding(data)
+        with open(name, 'wb') as f:
             pk.dump(data, f)
     with open(name, 'rb') as f:
         data = pk.load(f)
@@ -196,6 +245,21 @@ def load_data(basedir):
     # torch sparse tensor cannot be saved to disk
     data.adj = to_torch_sparse_tensor(data.adj)
     return data
+
+
+def get_calls_distribution(dataset):
+    nb_calls = defaultdict(int)
+    for pid in range(dataset.nb_proj):
+        item_size = [len(dataset.invocation_mx[uid]) for uid in dataset.proj_have_users[pid]]
+        for s in item_size:
+            nb_calls[s] += 1
+    s = 0
+    for calls, num in nb_calls.items():
+        if calls <= 6:
+            print('user having {} API calls count as: {}'.format(calls, num))
+        else:
+            s += num
+    print('user having more than 6 API calls count as: {}'.format(s))
 
 
 if __name__ == '__main__':
