@@ -26,7 +26,9 @@ class GCNRec(nn.Module):
 
         self.a = nn.Parameter(torch.Tensor(2*emb_dim))
         self.word_trans = nn.Linear(emb_dim, 2*emb_dim)
-
+        self.rnn = nn.GRU(emb_dim, emb_dim, num_layers=2,
+                          dropout=0.2, batch_first=True)
+        
         self.other_pos_emb = nn.Embedding(nb_other, emb_dim)
         self.user_pos_emb = nn.Embedding(nb_user, emb_dim)
         self.item_pos_emb = nn.Embedding(nb_item, emb_dim)
@@ -47,12 +49,19 @@ class GCNRec(nn.Module):
         # (node_sz, seq_len, 64) -> (node_sz, 64)
         out = emb.mul(attn).sum(1)
         return out
+    
+    def rnn_encoding(self):
+        # (node_sz, seq_len, 64)
+        emb = self.word_emb(self.lookup_index)
+        rnn_out, hidden = self.rnn(emb)
+        # (node_sz, 64)
+        return hidden[-1]
 
     def refine_embedding(self):
         # (node_sz, seq_len, emb_dim) -> (node_sz, emb_dim)
         pos_emb = torch.cat([self.other_pos_emb.weight,
                              self.user_pos_emb.weight, self.item_pos_emb.weight])
-        all_emb = self.att_pooling() + pos_emb
+        all_emb = pos_emb + self.rnn_encoding()
         h_emb = []
         conv_emb = F.dropout(self.conv1(all_emb, self.adj),
                              p=self.dropout, training=self.training)
